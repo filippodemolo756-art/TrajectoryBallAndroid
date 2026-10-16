@@ -1,0 +1,226 @@
+
+/*
+ * TRAJECTORY BALL — Motore di analisi del movimento
+ * Analisi locale dei fotogrammi, senza acquisizione audio.
+ *
+ * Input: fotogrammi RGBA consecutivi.
+ * Output: posizione, velocità, traiettoria e urti stimati.
+ */
+
+class TrajectoryBall {
+  constructor() {
+    this.previous = null;
+    this.previousBall = null;
+    this.history = [];
+    this.nextId = 1;
+    this.maxHistory = 30;
+  }
+
+  analyze(frame) {
+    if (!frame || !frame.data ||
+        !frame.width || !frame.height) {
+      throw new Error("Fotogramma RGBA non valido");
+    }
+
+    const { data, width, height } = frame;
+    const scale = Math.max(
+      1, Math.floor(Math.min(width, height) / 180)
+    );
+
+    const candidates = this.detectCandidates(
+      data, width, height, scale
+    );
+
+    const ball = this.selectCandidate(candidates);
+
+    if (!ball) {
+      return {
+        detected: false,
+        message: "Nessuna palla rilevata",
+        trajectory: this.history.slice()
+      };
+    }
+
+    let vx = 0;
+    let vy = 0;
+    let speed = 0;
+    let impact = false;
+
+    if (this.previousBall) {
+      const dx = ball.x - this.previousBall.x;
+      const dy = ball.y - this.previousBall.y;
+
+      vx = dx;
+      vy = dy;
+      speed = Math.hypot(vx, vy);
+
+      const oldVelocity = this.previousBall.velocity;
+      if (oldVelocity) {
+        const change = Math.hypot(
+          vx - oldVelocity.x,
+          vy - oldVelocity.y
+        );
+
+        impact = change > Math.max(8, speed * 0.65);
+      }
+    }
+
+    const result = {
+      id: ball.id,
+      detected: true,
+      x: ball.x,
+      y: ball.y,
+      radius: ball.radius,
+      color: ball.color,
+      velocity: { x: vx, y: vy },
+      speed,
+      impact,
+      trajectory: this.history.slice()
+    };
+
+    this.history.push({ x: ball.x, y: ball.y });
+    if (this.history.length > this.maxHistory) {
+      this.history.shift();
+    }
+
+    this.previousBall = {
+      ...ball,
+      velocity: { x: vx, y: vy }
+    };
+
+    this.previous = { width, height };
+    return result;
+  }
+
+  detectCandidates(data, width, height, scale) {
+    const gridW = Math.ceil(width / scale);
+    const gridH = Math.ceil(height / scale);
+    const visited = new Uint8Array(gridW * gridH);
+    const candidates = [];
+
+    const luminance = (i) =>
+      0.299 * data[i] +
+      0.587 * data[i + 1] +
+      0.114 * data[i + 2];
+
+    const isEdge = (x, y) => {
+      const i = (y * width + x) * 4;
+      const right = (y * width +
+        Math.min(width - 1, x + scale)) * 4;
+      const down = (Math.min(height - 1, y + scale) *
+        width + x) * 4;
+
+      return Math.abs(luminance(i) - luminance(right)) +
+        Math.abs(luminance(i) - luminance(down)) > 45;
+    };
+
+    for (let gy = 1; gy < gridH - 1; gy++) {
+      for (let gx = 1; gx < gridW - 1; gx++) {
+        const index = gy * gridW + gx;
+        if (visited[index]) continue;
+
+        const x = Math.min(width - 1, gx * scale);
+        const y = Math.min(height - 1, gy * scale);
+        if (!isEdge(x, y)) continue;
+
+        const queue = [[gx, gy]];
+        visited[index] = 1;
+        let minX = gx, maxX = gx;
+        let minY = gy, maxY = gy;
+        let count = 0;
+
+        while (queue.length && count < 1500) {
+          const [cx, cy] = queue.pop();
+          count++;
+
+          minX = Math.min(minX, cx);
+          maxX = Math.max(maxX, cx);
+          minY = Math.min(minY, cy);
+          maxY = Math.max(maxY, cy);
+
+          for (const [nx, ny] of [
+            [cx + 1, cy], [cx - 1, cy],
+            [cx, cy + 1], [cx, cy - 1]
+          ]) {
+            if (nx < 1 || ny < 1 ||
+                nx >= gridW - 1 || ny >= gridH - 1) {
+              continue;
+            }
+
+            const ni = ny * gridW + nx;
+            if (visited[ni]) continue;
+
+            const px = Math.min(width - 1, nx * scale);
+            const py = Math.min(height - 1, ny * scale);
+
+            if (isEdge(px, py)) {
+              visited[ni] = 1;
+              queue.push([nx, ny]);
+            }
+          }
+        }
+
+        const bw = (maxX - minX + 1) * scale;
+        const bh = (maxY - minY + 1) * scale;
+        const ratio = bw / Math.max(1, bh);
+        const area = bw * bh;
+
+        if (ratio > 0.65 && ratio < 1.45 &&
+            area >= scale * scale * 9 &&
+            area < width * height * 0.08) {
+          const cx = Math.round((minX + maxX) * scale / 2);
+          const cy = Math.round((minY + maxY) * scale / 2);
+
+          const i = (Math.min(height - 1, cy) *
+            width + Math.min(width - 1, cx)) * 4;
+
+          candidates.push({
+            id: this.nextId++,
+            x: cx,
+            y: cy,
+            radius: Math.round((bw + bh) / 4),
+            color: `rgb(${data[i]},${data[i + 1]},${data[i + 2]})`,
+            area
+          });
+        }
+      }
+    }
+
+    return candidates;
+  }
+
+  selectCandidate(candidates) {
+    if (!candidates.length) return null;
+
+    if (!this.previousBall) {
+      return candidates.sort((a, b) => b.area - a.area)[0];
+    }
+
+    const old = this.previousBall;
+    return candidates.sort((a, b) => {
+      const da = Math.hypot(a.x - old.x, a.y - old.y);
+      const db = Math.hypot(b.x - old.x, b.y - old.y);
+      return da - db;
+    })[0];
+  }
+
+  predict(frames = 20) {
+    if (!this.previousBall) return [];
+
+    const { x, y, velocity } = this.previousBall;
+    return Array.from({ length: frames }, (_, i) => ({
+      x: x + velocity.x * (i + 1),
+      y: y + velocity.y * (i + 1)
+    }));
+  }
+
+  reset() {
+    this.previous = null;
+    this.previousBall = null;
+    this.history = [];
+  }
+}
+
+if (typeof module !== "undefined") {
+  module.exports = TrajectoryBall;
+}
