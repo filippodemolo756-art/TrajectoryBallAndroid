@@ -1,0 +1,51 @@
+
+name: Build Trajectory Ball APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: List project files
+        run: |
+          echo "Repository contents:"
+          find . -maxdepth 4 -type f | sort | head -200
+
+      - name: Build Android APK
+        run: |
+          if [ -f gradlew ]; then
+            chmod +x gradlew
+            ./gradlew assembleDebug
+          elif [ -f 8ball/gradlew ]; then
+            cd 8ball
+            chmod +x gradlew
+            ./gradlew assembleDebug
+          else
+            echo "Gradle wrapper not found. Android project needs setup."
+            exit 1
+          fi
+
+      - name: Upload APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrajectoryBall-debug-apk
+          path: |
+            app/build/outputs/apk/debug/*.apk
+            8ball/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
